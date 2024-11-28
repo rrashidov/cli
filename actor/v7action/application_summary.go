@@ -2,6 +2,8 @@ package v7action
 
 import (
 	"errors"
+	"fmt"
+	"time"
 
 	"code.cloudfoundry.org/cli/actor/actionerror"
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccerror"
@@ -57,6 +59,10 @@ func (actor Actor) GetAppSummariesForSpace(spaceGUID string, labelSelector strin
 	var processSummariesByAppGUID map[string]ProcessSummaries
 	var warnings Warnings
 
+	fmt.Println("KON, after this point in the code, the actor is going to get process summaries")
+
+	start := time.Now()
+
 	if !omitStats {
 		processSummariesByAppGUID, warnings, err = actor.getProcessSummariesForApps(apps)
 		allWarnings = append(allWarnings, warnings...)
@@ -64,6 +70,11 @@ func (actor Actor) GetAppSummariesForSpace(spaceGUID string, labelSelector strin
 			return nil, allWarnings, err
 		}
 	}
+
+	end := time.Now()
+
+	fmt.Println("KON, at this point in code, application process summaries should have been retrieved")
+	fmt.Println("KON, it took: " + end.Sub(start).String())
 
 	var routes []resources.Route
 
@@ -149,9 +160,37 @@ func (actor Actor) getProcessSummariesForApps(apps []resources.Application) (map
 		return nil, allWarnings, err
 	}
 
+	instancesChan := make(chan struct {
+		instances []ccv3.ProcessInstance
+		warnings  ccv3.Warnings
+		err       error
+	}, len(processes))
+
+	start := time.Now()
+
+	fmt.Println("KON, schedule the process instance retrieval for " + string(len(processes)) + " processes")
+
 	for _, process := range processes {
-		instances, warnings, err := actor.CloudControllerClient.GetProcessInstances(process.GUID)
-		allWarnings = append(allWarnings, Warnings(warnings)...)
+		go func(process resources.Process) {
+			instances, warnings, err := actor.CloudControllerClient.GetProcessInstances(process.GUID)
+			instancesChan <- struct {
+				instances []ccv3.ProcessInstance
+				warnings  ccv3.Warnings
+				err       error
+			}{instances, warnings, err}
+		}(process)
+	}
+
+	end := time.Now()
+
+	fmt.Println("KON, scheduled the process instance retrieval for " + string(len(processes)) + " processes; it took: " + end.Sub(start).String())
+	fmt.Println("KON, start waiting for the retrieval to finish up")
+
+	start = time.Now()
+
+	for _, process := range processes {
+		result := <-instancesChan
+		allWarnings = append(allWarnings, Warnings(result.warnings)...)
 
 		if err != nil {
 			switch err.(type) {
@@ -163,7 +202,7 @@ func (actor Actor) getProcessSummariesForApps(apps []resources.Application) (map
 		}
 
 		var instanceDetails []ProcessInstance
-		for _, instance := range instances {
+		for _, instance := range result.instances {
 			instanceDetails = append(instanceDetails, ProcessInstance(instance))
 		}
 
@@ -174,6 +213,11 @@ func (actor Actor) getProcessSummariesForApps(apps []resources.Application) (map
 
 		processSummariesByAppGUID[process.AppGUID] = append(processSummariesByAppGUID[process.AppGUID], processSummary)
 	}
+
+	end = time.Now()
+
+	fmt.Println("KON, finished waiting for the retrieval to finish up; it took: " + end.Sub(start).String())
+
 	return processSummariesByAppGUID, allWarnings, nil
 }
 
